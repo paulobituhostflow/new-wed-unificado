@@ -1,0 +1,97 @@
+# Registro de decisões
+
+## D-001 — Projeto sem legado
+
+O projeto começa vazio. Não haverá migração, conciliação nem compatibilidade Base44.
+
+## D-002 — Qualificação e checkout humanos
+
+Somente um usuário humano pode mover um lead para `QUALIFICADO` e autorizar checkout. O agente pode atender, coletar contexto e gerar handoff, mas não concluir essas ações.
+
+## D-003 — Máquina de checkout
+
+Estados principais: `CREATING → READY → SEND_PENDING → SENT → PENDING → PAID`. Saídas: `FAILED`, `OVERDUE`, `CANCELLED` e `REFUNDED`. A cobrança criada nunca equivale a pagamento.
+
+## D-004 — Pagamentos
+
+Pix é cobrança única. Cartão aceita de 1 até o limite configurado por edição, inicialmente 12. A aprovação inicial do cartão promove o lead a `PAGO`; parcelas posteriores seguem em conciliação financeira.
+
+## D-005 — Inbox v1
+
+A primeira versão oferece lista, busca, transcript, resposta manual, claim/release e falhas. Usa polling de 5 segundos com a página ativa e 30 segundos em segundo plano. WebSocket e roteamento avançado ficam fora da v1.
+
+## D-006 — Contexto do agente
+
+D1 é a fonte de contexto. A OpenAI recebe resumo, 12 mensagens recentes, lead, edição e catálogo com `store:false`. A resposta é estruturada como `{reply, confidence, handoff, reason}`.
+
+## D-007 — Handoff obrigatório
+
+Baixa confiança, intenção de compra, reclamação, pedido humano e falha da OpenAI pausam o agente e encaminham a conversa a uma pessoa.
+
+## D-008 — Confirmação da equipe
+
+No primeiro `PAGO`, criar uma notificação interna e um e-mail. O destinatário primário é o responsável pelo lead; sem responsável, gestores e administradores recebem. Deduplicação impede repetição.
+
+## D-009 — E-mail
+
+Usar o binding nativo Cloudflare `EMAIL`, com HTML e texto, envio por outbox, retry e destinatários/remetentes restritos na configuração.
+
+## D-010 — Serviços externos
+
+Testes automatizados mockam apenas Meta, OpenAI, Asaas e e-mail. Nenhuma mensagem, cobrança, e-mail, deploy ou tráfego real ocorre sem configuração e autorização específicas.
+
+## D-011 — Testes Workers atuais
+
+Usar `@cloudflare/vitest-plugin`, integração oficial para o runtime Workers, em vez do pacote legado `@cloudflare/vitest-pool-workers`. A versão `1.1.9` exige Vitest `^4.1.0`; portanto o projeto fixa Vitest `4.1.x` até que o contrato oficial aceite uma versão posterior. A configuração de teste usa bindings Miniflare explícitos e nunca carrega `.dev.vars`.
+
+## D-012 — Estado do checkout em três eixos
+
+`checkouts.status` representa a máquina técnica; `financial_status` representa a situação financeira e `send_status` representa o envio no WhatsApp. Os eixos não são inferidos um do outro, e timestamps registram cada marco.
+
+## D-013 — Transições manuais e concorrência
+
+`CHECKOUT_ENVIADO`, `AGUARDANDO_PAGAMENTO` e `PAGO` são etapas exclusivas das integrações. A API humana usa atualização otimista por etapa anterior; histórico, auditoria e tarefa só são inseridos quando a atualização modifica exatamente um lead.
+
+## D-014 — Compatibilidade temporária da conversa
+
+`conversations.mode` (`AGENT` ou `HUMAN`) é o estado autoritativo. `human_active` permanece apenas como espelho temporário para compatibilidade de rollout; nenhum fluxo decide por esse campo.
+
+## D-015 — Checkout assíncrono e recuperável
+
+A API apenas reserva a vaga e persiste checkout/outbox, retornando `202`. A Queue consulta o Asaas por `externalReference` antes de criar a cobrança. Leases, backoff e outbox permitem retomar falhas sem repetir a cobrança.
+
+## D-016 — Aceite, entrega e pagamento são eventos distintos
+
+`READY` indica cobrança válida; `SENT` e `CHECKOUT_ENVIADO` exigem aceite da Meta; `PENDING` e `AGUARDANDO_PAGAMENTO` exigem entrega Meta ou marcação humana auditada. Somente evento financeiro conciliado gera `PAGO`.
+
+## D-017 — Cancelamento encerra cobranças abertas
+
+Expiração ou cancelamento libera a reserva local e agenda a remoção da cobrança no Asaas. Cobrança única usa `/payments/:id`; parcelamento remove cobranças pendentes/vencidas por `/installments/:id/payments`. Uma confirmação financeira observada durante a corrida prevalece e volta à conciliação de capacidade.
+
+## D-018 — Exclusão mútua agente/humano
+
+O claim muda imediatamente a conversa para `HUMAN`, mas preserva um lease automático já em andamento até o worker observar a pausa. Enquanto esse lease existir, a API manual não aceita resposta. Assim, agente e vendedor não obtêm simultaneamente permissão de envio.
+
+## D-019 — Ingestão Meta recuperável
+
+Mensagem recebida e cada estado Meta usam identificadores de webhook distintos e outbox persistente antes da publicação na Queue. Repetição é segura, e eventos `sent`, `delivered` e `read` do mesmo message ID não colidem.
+
+## D-020 — Rate limit persistente
+
+Os limites v1 usam buckets atômicos no D1 e armazenam somente hashes de IP/identidade. Isso mantém comportamento determinístico em testes e entre instâncias; um binding nativo de Rate Limiting pode ser adicionado como primeira barreira após a criação dos recursos externos.
+
+## D-021 — Correlação operacional
+
+Cada entrada pública, autorização de checkout e webhook recebe `requestId`, devolvido em `x-request-id` e propagado por D1/outbox até conversa, mensagem e notificação. Payloads reais e segredos não entram em logs nem checkpoints.
+
+## D-022 — Restrições de e-mail
+
+O Worker de eventos aceita somente o remetente `marketing@newwed.com.br` e, até o provisionamento operacional, os dois destinatários públicos conhecidos. A allowlist deve ser substituída pelos usuários aprovados antes do piloto; destinatários fora dela falham de forma visível e retomável pela outbox.
+
+## D-023 — Eventos financeiros fora de ordem
+
+`REFUNDED` é terminal na conciliação local. Um pagamento já `PAID` não pode regredir por eventos posteriores `PENDING`, `OVERDUE` ou `CANCELLED`; somente um estorno explícito o altera. Isso vale tanto para webhooks quanto para snapshots recuperados durante a criação.
+
+## D-024 — Lançamento exige gate humano
+
+O código pode preparar e validar estaticamente staging/produção, mas não cria recursos, publica Workers nem gera tráfego de Meta, Asaas ou e-mail. Esses passos exigem IDs/credenciais externos e autorização específica registrada para a janela de validação ou piloto.
